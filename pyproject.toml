@@ -1,0 +1,10 @@
+[project]
+name = "ftqram"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "qiskit>=2.2.3",
+    "qiskit-aer>=0.17.2",
+]
