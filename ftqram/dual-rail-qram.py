@@ -71,26 +71,24 @@ def flagged_conservation_check(circuit, bus_in, left_out, right_out, ancilla_che
     
 def dual_rail_router_gate(circuit, addr_pair, bus_pair, left_pair, right_pair):
     """
-    Implements the Fault-Tolerant Routing Unitary using Rail Logic.
-    Does NOT use raw CSWAP. Uses Toffoli-based copying which is FT-friendly.
+    Corrected Routing Logic using CSWAP (Fredkin).
+    Ensures signal is MOVED (conserved), not copied.
     """
-    a0, a1 = addr_pair
+    a0, a1 = addr_pair  # a0=Logic 1, a1=Logic 0
     b0, b1 = bus_pair
     l0, l1 = left_pair
     r0, r1 = right_pair
     
-    # LOGIC:
-    # If Addr is Logical 0 (|01>), a1 is active -> Route to LEFT
-    # If Addr is Logical 1 (|10>), a0 is active -> Route to RIGHT
+    # Logic:
+    # If a0 is active (Address=1): Swap Bus -> Right
+    circuit.cswap(a0, b0, r0)
+    circuit.cswap(a0, b1, r1)
     
-    # 1. Route to Right (Controlled by a0)
-    circuit.ccx(a0, b0, r0)
-    circuit.ccx(a0, b1, r1)
-    
-    # 2. Route to Left (Controlled by a1)
-    circuit.ccx(a1, b0, l0)
-    circuit.ccx(a1, b1, l1)
+    # If a1 is active (Address=0): Swap Bus -> Left
+    circuit.cswap(a1, b0, l0)
+    circuit.cswap(a1, b1, l1)
 
+    
 class FlagBridgeQRAM:
     def __init__(self, address_width, data_values):
         self.addr_width = address_width

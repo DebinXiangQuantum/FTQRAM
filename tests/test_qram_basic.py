@@ -52,27 +52,43 @@ def test_qram_level(address_width, address_bits, expected_leaf):
     result = job.result()
     counts = result.get_counts()
     
+    # Build register bit map (Qiskit little-endian ordering)
+    bit_map = {}
+    current_idx = 0
+    reversed_cregs = list(reversed(qram.circuit.cregs))
+    for creg in reversed_cregs:
+        bit_map[creg.name] = (current_idx, current_idx + creg.size)
+        current_idx += creg.size
+    
     # Analyze results
     valid_shots = 0
     errors = 0
     erasures = 0
     
-    for k, v in counts.items():
-        bitstring = k.replace(' ', '')
+    for bitstring, count in counts.items():
+        clean_bits = bitstring.replace(' ', '')
         
-        # Parse: Output(2) + Flag(address_width) + Syndrome(address_width)
-        raw_output = bitstring[0:2]
-        raw_flag = bitstring[2:2+address_width]
-        raw_syndrome = bitstring[2+address_width:]
+        # Extract syndrome
+        if 'syndrome' in bit_map:
+            start, end = bit_map['syndrome']
+            syndrome = clean_bits[start:end]
+            has_error = '1' in syndrome
+        else:
+            has_error = False
         
-        has_error = '1' in raw_syndrome
+        # Extract output
+        if 'output_dual_rail' in bit_map:
+            start, end = bit_map['output_dual_rail']
+            raw_output = clean_bits[start:end]
+        else:
+            raw_output = '00'
         
         if has_error:
-            errors += v
+            errors += count
         elif raw_output in ['01', '10']:
-            valid_shots += v
+            valid_shots += count
         else:
-            erasures += v
+            erasures += count
     
     success_rate = (valid_shots / 1000) * 100
     error_rate = (errors / 1000) * 100

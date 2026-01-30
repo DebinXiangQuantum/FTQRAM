@@ -100,25 +100,31 @@ def test_plus_basis_address(address_width, basis_pattern, description):
     total_valid = 0
     total_errors = 0
     
+    # Build register bit map (Qiskit little-endian ordering)
+    bit_map = {}
+    current_idx = 0
+    reversed_cregs = list(reversed(qram.circuit.cregs))
+    for creg in reversed_cregs:
+        bit_map[creg.name] = (current_idx, current_idx + creg.size)
+        current_idx += creg.size
+    
     for bitstring, count in counts.items():
-        bits = bitstring.replace(' ', '')
+        clean_bits = bitstring.replace(' ', '')
         
         # Extract syndrome
-        syndrome_start = len(bits) - address_width
-        syndrome = bits[syndrome_start:]
+        if 'syndrome' in bit_map:
+            start, end = bit_map['syndrome']
+            syndrome = clean_bits[start:end]
+            if '1' in syndrome:
+                total_errors += count
+                continue
         
-        if '1' in syndrome:
-            total_errors += count
-            continue
-        
-        # Parse leaf measurements
-        leaf_start = 2 + address_width
-        leaf_end = syndrome_start
-        leaf_bits = bits[leaf_start:leaf_end]
-        
+        # Parse leaf measurements - each leaf has its own register
         for i in range(2**address_width):
-            if i*2+1 < len(leaf_bits):
-                leaf_state = leaf_bits[i*2:i*2+2]
+            leaf_name = f'leaf_{i}'
+            if leaf_name in bit_map:
+                start, end = bit_map[leaf_name]
+                leaf_state = clean_bits[start:end]
                 if leaf_state in ['01', '10']:
                     leaf_activations[i] += count
                     total_valid += count

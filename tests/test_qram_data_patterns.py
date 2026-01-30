@@ -50,6 +50,56 @@ def initialize_memory_data(circuit, leaf_layer, address_index, data_bits):
         circuit.x(l0)
         circuit.x(l1)
 
+def analyze_qram_results(counts, circuit, address_width):
+    """
+    Robustly parses Qiskit counts by mapping ClassicalRegister names to bit locations.
+    Solves the 'Endianness' confusion once and for all.
+    """
+    # 1. Build a map of {RegisterName: (Start_Index, End_Index)}
+    # Qiskit bitstrings are printed: "RegN ... Reg1 Reg0" (Reversed addition order)
+    bit_map = {}
+    current_idx = 0
+    
+    # Qiskit prints regs in REVERSE order of how they were added to the circuit
+    reversed_cregs = list(reversed(circuit.cregs))
+    for creg in reversed_cregs:
+        length = creg.size
+        bit_map[creg.name] = (current_idx, current_idx + length)
+        current_idx += length
+    
+    # print(f"  Debug: Register Bit Mapping: {bit_map}")
+    
+    valid_shots = 0
+    errors = 0
+    
+    # 2. Parse Every Shot
+    for bitstring, frequency in counts.items():
+        clean_bits = bitstring.replace(' ', '')
+        
+        # Helper to get int value from bit substring
+        def get_val(name):
+            if name not in bit_map:
+                return 0
+            start, end = bit_map[name]
+            return int(clean_bits[start:end], 2)
+        
+        syndrome_val = get_val('syndrome')
+        flag_val = get_val('flag')
+        output_val = get_val('output_dual_rail')
+        
+        # 3. Analyze
+        if syndrome_val != 0:
+            errors += frequency
+        elif flag_val != 0:
+            errors += frequency
+        else:
+            # Valid routing - check if output is valid dual-rail
+            output_bits = clean_bits[bit_map['output_dual_rail'][0]:bit_map['output_dual_rail'][1]]
+            if output_bits in ['01', '10']:
+                valid_shots += frequency
+    
+    return valid_shots, errors
+
 def test_data_pattern(address_width, address_bits, data_pattern, expected_leaf):
     """
     Test QRAM query with specific data pattern at target address
@@ -62,7 +112,7 @@ def test_data_pattern(address_width, address_bits, data_pattern, expected_leaf):
     """
     print(f"\n{'='*60}")
     print(f"Testing Data Pattern")
-    print(f"Address: {address_bits} (Binary: {''.join(map(str, address_bits))}) → Leaf {expected_leaf}")
+    print(f"Address: {address_bits} (Binary: {''.join(map(str, address_bits))}) -> Leaf {expected_leaf}")
     print(f"Data: {data_pattern} (Binary: {''.join(map(str, data_pattern))}) = {int(''.join(map(str, data_pattern)), 2)}")
     print(f"{'='*60}")
     
@@ -75,18 +125,8 @@ def test_data_pattern(address_width, address_bits, data_pattern, expected_leaf):
     # Build routing circuit
     qram.build_circuit()
     
-    # In a full implementation, we would:
-    # 1. Route to the correct leaf (done by build_circuit)
-    # 2. Read data from that leaf's memory register
-    # 3. Route data back through the tree
-    
-    # For this test, we verify routing works and demonstrate data encoding
     # Measure the target leaf
     qram.measure_logical_output(target_leaf_index=expected_leaf)
-    
-    # Add measurement for data verification
-    # In real QRAM, data would be in separate registers
-    # Here we show the concept
     
     print(f"Circuit: {qram.circuit.num_qubits} qubits, {qram.circuit.depth()} depth")
     
@@ -100,27 +140,15 @@ def test_data_pattern(address_width, address_bits, data_pattern, expected_leaf):
     result = job.result()
     counts = result.get_counts()
     
-    # Analyze results
-    valid_shots = 0
-    errors = 0
-    
-    for k, v in counts.items():
-        bitstring = k.replace(' ', '')
-        
-        raw_output = bitstring[0:2]
-        raw_syndrome = bitstring[2+address_width:]
-        
-        if '1' in raw_syndrome:
-            errors += v
-        elif raw_output in ['01', '10']:
-            valid_shots += v
+    # Analyze results using robust parsing
+    valid_shots, errors = analyze_qram_results(counts, qram.circuit, address_width)
     
     success_rate = (valid_shots / 1000) * 100
     
     print(f"\nResults:")
     print(f"  Valid routing: {valid_shots} ({success_rate:.1f}%)")
     print(f"  Errors: {errors}")
-    print(f"  Status: {'✓ PASS' if success_rate > 95 else '✗ FAIL'}")
+    print(f"  Status: {'PASS' if success_rate > 95 else 'FAIL'}")
     
     return {
         'address': address_bits,

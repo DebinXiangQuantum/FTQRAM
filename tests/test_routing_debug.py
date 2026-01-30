@@ -63,25 +63,32 @@ def debug_routing(address_width, address_bits, expected_leaf):
     print(f"\nMeasurement results (100 shots):")
     print(f"Total outcomes: {len(counts)}")
     
+    # Build register bit map (Qiskit little-endian ordering)
+    bit_map = {}
+    current_idx = 0
+    reversed_cregs = list(reversed(qram.circuit.cregs))
+    for creg in reversed_cregs:
+        bit_map[creg.name] = (current_idx, current_idx + creg.size)
+        current_idx += creg.size
+    
     # Parse results
     for bitstring, count in sorted(counts.items(), key=lambda x: -x[1])[:5]:
-        bits = bitstring.replace(' ', '')
+        clean_bits = bitstring.replace(' ', '')
         print(f"\n  Outcome (count={count}): {bitstring}")
         
         # Parse syndrome
-        syndrome_start = len(bits) - address_width
-        syndrome = bits[syndrome_start:]
-        print(f"    Syndrome: {syndrome} {'OK' if syndrome == '0'*address_width else 'ERROR'}")
+        if 'syndrome' in bit_map:
+            start, end = bit_map['syndrome']
+            syndrome = clean_bits[start:end]
+            print(f"    Syndrome: {syndrome} {'OK' if syndrome == '0'*address_width else 'ERROR'}")
         
         # Parse leaves
-        leaf_start = 2 + address_width
-        leaf_end = syndrome_start
-        leaf_bits = bits[leaf_start:leaf_end]
-        
         print(f"    Leaf states:")
         for i in range(2**address_width):
-            if i*2+1 < len(leaf_bits):
-                leaf_state = leaf_bits[i*2:i*2+2]
+            leaf_name = f'leaf_{i}'
+            if leaf_name in bit_map:
+                start, end = bit_map[leaf_name]
+                leaf_state = clean_bits[start:end]
                 if leaf_state == '01':
                     print(f"      Leaf {i}: |01> (Logical |0>) OK")
                 elif leaf_state == '10':
