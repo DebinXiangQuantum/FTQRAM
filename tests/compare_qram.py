@@ -13,7 +13,13 @@ from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister
 from qiskit_aer import Aer
 
 from bucktele import Qram as BuckQram, RouterQubit
-from ftqram.dual_rail import DualRailQram, logical_h, prepare_logical_zero, split_dual_rail_register
+from ftqram.dual_rail import (
+    DualRailBucketQram,
+    DualRailQram,
+    logical_h,
+    prepare_logical_zero,
+    split_dual_rail_register,
+)
 
 
 @dataclass
@@ -228,8 +234,8 @@ def run_dualrail(address_bits: int, data: List[int], shots: int, seed: int) -> T
         prepare_logical_zero(circuit, pair)
         logical_h(circuit, pair)
 
-    qram = DualRailQram(address_list, data, bandwidth=1, record_syndrome=True, prepare_bus=True)
-    qram(circuit, addr_q, bus_q)
+    qram = DualRailBucketQram(address_list, data, bandwidth=1)
+    qram(addr_q, bus_q)
 
     addr_c = ClassicalRegister(2 * address_bits, "addr_c")
     bus_c = ClassicalRegister(2, "bus_c")

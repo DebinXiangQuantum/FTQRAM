@@ -1,6 +1,7 @@
 """Dual-rail FT-QRAM implementation."""
 
 from .qram import DualRailQram
+from .bucktele_qram import DualRailBucketQram
 from .qubits import (
     DualRailPair,
     logical_h,
@@ -13,6 +14,7 @@ from .qubits import (
 
 __all__ = [
     "DualRailQram",
+    "DualRailBucketQram",
     "DualRailPair",
     "logical_h",
     "logical_x",
