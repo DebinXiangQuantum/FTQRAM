@@ -8,7 +8,7 @@ from typing import List, Optional
 from qiskit import QuantumCircuit, QuantumRegister
 
 from .ops import cswap_dual_rail, swap_dual_rail
-from .qubits import DualRailPair, logical_h, logical_x, prepare_logical_zero
+from .qubits import DualRailPair, logical_h, prepare_logical_zero
 
 
 @dataclass
@@ -27,7 +27,6 @@ class DualRailRouterQubit:
 
     def __post_init__(self) -> None:
         self.qreg = QuantumRegister(2, self.reg_name)
-        self.data: Optional[QuantumRegister] = None
 
     @property
     def address(self) -> str:
@@ -44,10 +43,6 @@ class DualRailRouterQubit:
     @property
     def pair(self) -> DualRailPair:
         return DualRailPair(self.qreg[0], self.qreg[1], self.reg_name)
-
-    def add_data_qubits(self, circuit: QuantumCircuit) -> None:
-        self.data = QuantumRegister(1, f"{self.reg_name}_data")
-        circuit.add_register(self.data)
 
 
 class DualRailBucketQram:
@@ -90,7 +85,6 @@ class DualRailBucketQram:
             self.circuit.add_register(root.left_router.qreg)
         if root.right_router is not None:
             self.circuit.add_register(root.right_router.qreg)
-        # routers are already tracked during _build_tree
         if root.left is not None:
             self.add_router_tree(level + 1, root.left)
         if root.right is not None:
@@ -100,11 +94,20 @@ class DualRailBucketQram:
         self.incident = incident
         self.circuit.add_register(self.incident.qreg)
 
-    def __call__(self, address_qubits: QuantumRegister, bus_qubits: QuantumRegister) -> QuantumCircuit:
+    def __call__(self, *args) -> QuantumCircuit:
+        if len(args) == 3 and isinstance(args[0], QuantumCircuit):
+            circuit, address_qubits, bus_qubits = args
+            self.circuit = circuit
+        elif len(args) == 2:
+            address_qubits, bus_qubits = args
+            if self.circuit is None:
+                self.circuit = QuantumCircuit(address_qubits, bus_qubits)
+            circuit = self.circuit
+        else:
+            raise ValueError("Expected (circuit, address_qubits, bus_qubits) or (address_qubits, bus_qubits)")
+
         self.address_qubits = address_qubits
         self.bus_qubits = bus_qubits
-        if self.circuit is None:
-            self.circuit = QuantumCircuit(address_qubits, bus_qubits)
 
         # Build router tree and incident register
         self.routers = [[] for _ in range(self.depth)]
@@ -114,23 +117,32 @@ class DualRailBucketQram:
         incident = DualRailRouterQubit(0, 0, "inc", None)
         self.add_incident_qubits(incident)
 
-        for node in self.routers[-1]:
-            node.add_data_qubits(self.circuit)
-
         self.decompose_circuit(self.circuit)
         return self.circuit
 
-    def _router(self, circuit: QuantumCircuit, router: DualRailPair, incident: DualRailPair, left: DualRailPair, right: DualRailPair) -> None:
-        logical_x(circuit, router)
-        cswap_dual_rail(circuit, router.rail0, incident, left)
-        logical_x(circuit, router)
+    def _router(
+        self,
+        circuit: QuantumCircuit,
+        router: DualRailPair,
+        incident: DualRailPair,
+        left: DualRailPair,
+        right: DualRailPair,
+    ) -> None:
+        # rail1=1 when |0_L> -> route left
+        cswap_dual_rail(circuit, router.rail1, incident, left)
+        # rail0=1 when |1_L> -> route right
         cswap_dual_rail(circuit, router.rail0, incident, right)
 
-    def _reverse_router(self, circuit: QuantumCircuit, router: DualRailPair, incident: DualRailPair, left: DualRailPair, right: DualRailPair) -> None:
+    def _reverse_router(
+        self,
+        circuit: QuantumCircuit,
+        router: DualRailPair,
+        incident: DualRailPair,
+        left: DualRailPair,
+        right: DualRailPair,
+    ) -> None:
         cswap_dual_rail(circuit, router.rail0, incident, right)
-        logical_x(circuit, router)
-        cswap_dual_rail(circuit, router.rail0, incident, left)
-        logical_x(circuit, router)
+        cswap_dual_rail(circuit, router.rail1, incident, left)
 
     def _layers_router(
         self,
@@ -140,21 +152,23 @@ class DualRailBucketQram:
         address_index: int,
         mid: DualRailRouterQubit,
     ) -> None:
+        n_logical = len(self.address_qubits) // 2
+
         if router_obj.level == 0:
             swap_dual_rail(circuit, incident, mid.pair)
         if router_obj.level == 0 and address_index == 0:
             swap_dual_rail(circuit, router_obj.pair, mid.pair)
         else:
-            if router_obj.level + 2 == address_index and address_index == len(self.address_qubits) // 2:
-                self._router(circuit, router_obj.pair, mid.pair, router_obj.left.pair, router_obj.right.pair)
+            if router_obj.level + 2 == address_index and address_index == n_logical:
+                self._router(
+                    circuit, router_obj.pair, mid.pair,
+                    router_obj.left.pair, router_obj.right.pair,
+                )
                 return
 
             self._router(
-                circuit,
-                router_obj.pair,
-                mid.pair,
-                router_obj.left_router.pair,
-                router_obj.right_router.pair,
+                circuit, router_obj.pair, mid.pair,
+                router_obj.left_router.pair, router_obj.right_router.pair,
             )
             if router_obj.level + 1 == address_index:
                 if router_obj.left_router is not None and router_obj.left is not None:
@@ -163,9 +177,15 @@ class DualRailBucketQram:
                     swap_dual_rail(circuit, router_obj.right_router.pair, router_obj.right.pair)
                 return
             if router_obj.left is not None:
-                self._layers_router(circuit, router_obj.left, router_obj.left_router.pair, address_index, router_obj.left_router)
+                self._layers_router(
+                    circuit, router_obj.left, router_obj.left_router.pair,
+                    address_index, router_obj.left_router,
+                )
             if router_obj.right is not None:
-                self._layers_router(circuit, router_obj.right, router_obj.right_router.pair, address_index, router_obj.right_router)
+                self._layers_router(
+                    circuit, router_obj.right, router_obj.right_router.pair,
+                    address_index, router_obj.right_router,
+                )
 
     def _reverse_layers_router(
         self,
@@ -175,33 +195,107 @@ class DualRailBucketQram:
         address_index: int,
         mid: DualRailRouterQubit,
     ) -> None:
+        n_logical = len(self.address_qubits) // 2
+
         if address_index != 0:
             if router_obj.level + 1 > address_index:
                 return
-            if router_obj.right is not None:
-                self._reverse_layers_router(circuit, router_obj.right, router_obj.right_router.pair, address_index, router_obj.right_router)
-            if router_obj.left is not None:
-                self._reverse_layers_router(circuit, router_obj.left, router_obj.left_router.pair, address_index, router_obj.left_router)
-            if router_obj.level + 2 == address_index and address_index == len(self.address_qubits) // 2:
-                self._router(circuit, router_obj.pair, mid.pair, router_obj.left.pair, router_obj.right.pair)
-                return
-            elif router_obj.level + 1 == address_index and address_index != len(self.address_qubits) // 2:
-                if router_obj.left_router is not None and router_obj.left is not None:
-                    swap_dual_rail(circuit, router_obj.left_router.pair, router_obj.left.pair)
-                if router_obj.right_router is not None and router_obj.right is not None:
-                    swap_dual_rail(circuit, router_obj.right_router.pair, router_obj.right.pair)
-            if router_obj.right_router is not None:
+            if router_obj.level + 2 == address_index and address_index == n_logical:
                 self._reverse_router(
-                    circuit,
-                    router_obj.pair,
-                    mid.pair,
-                    router_obj.left_router.pair,
-                    router_obj.right_router.pair,
+                    circuit, router_obj.pair, mid.pair,
+                    router_obj.left.pair, router_obj.right.pair,
                 )
+            else:
+                if router_obj.right is not None:
+                    self._reverse_layers_router(
+                        circuit, router_obj.right, router_obj.right_router.pair,
+                        address_index, router_obj.right_router,
+                    )
+                if router_obj.left is not None:
+                    self._reverse_layers_router(
+                        circuit, router_obj.left, router_obj.left_router.pair,
+                        address_index, router_obj.left_router,
+                    )
+                if router_obj.level + 1 == address_index and address_index != n_logical:
+                    if router_obj.left_router is not None and router_obj.left is not None:
+                        swap_dual_rail(circuit, router_obj.left_router.pair, router_obj.left.pair)
+                    if router_obj.right_router is not None and router_obj.right is not None:
+                        swap_dual_rail(circuit, router_obj.right_router.pair, router_obj.right.pair)
+                if router_obj.right_router is not None:
+                    self._reverse_router(
+                        circuit, router_obj.pair, mid.pair,
+                        router_obj.left_router.pair, router_obj.right_router.pair,
+                    )
         else:
             swap_dual_rail(circuit, router_obj.pair, mid.pair)
         if router_obj.level == 0:
             swap_dual_rail(circuit, incident, mid.pair)
+
+    def _leaf_cz(
+        self,
+        circuit: QuantumCircuit,
+        mid: DualRailRouterQubit,
+        leaf: DualRailRouterQubit,
+        leaf_address: str,
+    ) -> None:
+        """Apply dual-rail CZ between mid (displaced last addr bit) and leaf (bus).
+
+        In dual-rail: mid.pair.rail0=1 when last addr=|1_L⟩, mid.pair.rail1=1 when |0_L⟩.
+        leaf.pair.rail0=1 when bus=|1_L⟩.
+        """
+        # last_addr=|1_L⟩ case
+        if self.data[int(leaf_address + '1', 2)] == 1:
+            circuit.cz(mid.pair.rail0, leaf.pair.rail0)
+        # last_addr=|0_L⟩ case
+        if self.data[int(leaf_address + '0', 2)] == 1:
+            circuit.cz(mid.pair.rail1, leaf.pair.rail0)
+
+    def _bus_route_interact_unroute(
+        self,
+        circuit: QuantumCircuit,
+        router_obj: DualRailRouterQubit,
+        mid: DualRailRouterQubit,
+        address_index: int,
+    ) -> None:
+        """Route bus to leaves, apply CZ, then reverse route."""
+        n_logical = len(self.address_qubits) // 2
+
+        if router_obj.level + 1 > address_index:
+            return
+        if router_obj.level + 2 == address_index and address_index == n_logical:
+            # Forward: route to leaves
+            self._router(
+                circuit, router_obj.pair, mid.pair,
+                router_obj.left.pair, router_obj.right.pair,
+            )
+            # CZ interaction on each leaf
+            self._leaf_cz(circuit, mid, router_obj.left, router_obj.left.address)
+            self._leaf_cz(circuit, mid, router_obj.right, router_obj.right.address)
+            # Reverse
+            self._reverse_router(
+                circuit, router_obj.pair, mid.pair,
+                router_obj.left.pair, router_obj.right.pair,
+            )
+        else:
+            # Forward: route through intermediate nodes
+            self._router(
+                circuit, router_obj.pair, mid.pair,
+                router_obj.left_router.pair, router_obj.right_router.pair,
+            )
+            # Recurse into children
+            if router_obj.left is not None:
+                self._bus_route_interact_unroute(
+                    circuit, router_obj.left, router_obj.left_router, address_index,
+                )
+            if router_obj.right is not None:
+                self._bus_route_interact_unroute(
+                    circuit, router_obj.right, router_obj.right_router, address_index,
+                )
+            # Reverse
+            self._reverse_router(
+                circuit, router_obj.pair, mid.pair,
+                router_obj.left_router.pair, router_obj.right_router.pair,
+            )
 
     def decompose_circuit(self, circuit: QuantumCircuit) -> None:
         # Prepare bus in logical |+>
@@ -210,34 +304,38 @@ class DualRailBucketQram:
             prepare_logical_zero(circuit, pair)
             logical_h(circuit, pair)
 
+        n_logical = len(self.address_qubits) // 2
         address_pairs = [
-            DualRailPair(self.address_qubits[2 * i], self.address_qubits[2 * i + 1], f"addr{i}")
-            for i in range(len(self.address_qubits) // 2)
+            DualRailPair(
+                self.address_qubits[2 * i], self.address_qubits[2 * i + 1],
+                f"addr{i}",
+            )
+            for i in range(n_logical)
         ]
 
         incidents = {i: address_pairs[i] for i in range(len(address_pairs))}
-        incidents.update({i + len(address_pairs): bus_pairs[i] for i in range(len(bus_pairs))})
 
-        for idx in range(len(incidents)):
-            self._layers_router(circuit, self.routers[0][0], incidents[idx], idx, self.incident)
+        # Route address bits into the tree
+        for idx in range(n_logical):
+            self._layers_router(
+                circuit, self.routers[0][0], incidents[idx], idx, self.incident,
+            )
             circuit.barrier()
 
-        # Memory interaction on leaf nodes
-        for router_obj in self.routers[-1]:
-            left_idx = int(router_obj.address + "0", 2)
-            right_idx = int(router_obj.address + "1", 2)
+        # Route bus, interact at leaves, and unroute bus
+        for bus_pair in bus_pairs:
+            swap_dual_rail(circuit, bus_pair, self.incident.pair)
+            self._bus_route_interact_unroute(
+                circuit, self.routers[0][0], self.incident, n_logical,
+            )
+            swap_dual_rail(circuit, bus_pair, self.incident.pair)
+            circuit.barrier()
 
-            if self.data[right_idx] == 1:
-                circuit.cz(router_obj.pair.rail0, router_obj.data[0])
-            if self.data[left_idx] == 1:
-                logical_x(circuit, router_obj.pair)
-                circuit.cz(router_obj.pair.rail0, router_obj.data[0])
-                logical_x(circuit, router_obj.pair)
-
-        circuit.barrier()
-
-        for idx in reversed(range(len(address_pairs) + 1)):
-            self._reverse_layers_router(circuit, self.routers[0][0], incidents[idx], idx, self.incident)
+        # Reverse route address bits out of the tree
+        for idx in reversed(range(n_logical)):
+            self._reverse_layers_router(
+                circuit, self.routers[0][0], incidents[idx], idx, self.incident,
+            )
             circuit.barrier()
 
         for pair in bus_pairs:

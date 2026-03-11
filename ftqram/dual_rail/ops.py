@@ -39,6 +39,24 @@ def measure_parity(
     circuit.measure(ancilla, cbit)
 
 
+def measure_parity_syndrome(
+    circuit: QuantumCircuit,
+    pair: DualRailPair,
+    ancilla: Qubit,
+    cbit,
+) -> None:
+    """Measure parity-error syndrome: 0 = valid (odd parity), 1 = error (even parity).
+
+    This follows the convention that syndrome bit 0 means 'no error detected'.
+    """
+
+    circuit.reset(ancilla)
+    circuit.x(ancilla)
+    circuit.cx(pair.rail0, ancilla)
+    circuit.cx(pair.rail1, ancilla)
+    circuit.measure(ancilla, cbit)
+
+
 def measure_conservation(
     circuit: QuantumCircuit,
     left: DualRailPair,
@@ -51,4 +69,53 @@ def measure_conservation(
 
     measure_parity(circuit, left, ancilla, cbit_left)
     measure_parity(circuit, right, ancilla, cbit_right)
+
+
+def measure_conservation_syndrome(
+    circuit: QuantumCircuit,
+    left: DualRailPair,
+    right: DualRailPair,
+    ancilla: Qubit,
+    cbit_left,
+    cbit_right,
+) -> None:
+    """Conservation check with syndrome convention: 0 = valid, 1 = error."""
+
+    measure_parity_syndrome(circuit, left, ancilla, cbit_left)
+    measure_parity_syndrome(circuit, right, ancilla, cbit_right)
+
+
+def measure_phase_parity_syndrome(
+    circuit: QuantumCircuit,
+    pair: DualRailPair,
+    ancilla: Qubit,
+    cbit,
+) -> None:
+    """Detect Z errors on a dual-rail pair via X-basis parity check.
+
+    Convention: 0 = valid (no Z error), 1 = Z error detected.
+    Applies H to both rails, measures X-parity, then restores.
+    """
+    circuit.reset(ancilla)
+    circuit.x(ancilla)
+    circuit.h(pair.rail0)
+    circuit.h(pair.rail1)
+    circuit.cx(pair.rail0, ancilla)
+    circuit.cx(pair.rail1, ancilla)
+    circuit.h(pair.rail0)
+    circuit.h(pair.rail1)
+    circuit.measure(ancilla, cbit)
+
+
+def measure_phase_conservation_syndrome(
+    circuit: QuantumCircuit,
+    left: DualRailPair,
+    right: DualRailPair,
+    ancilla: Qubit,
+    cbit_left,
+    cbit_right,
+) -> None:
+    """Phase conservation check on two dual-rail pairs."""
+    measure_phase_parity_syndrome(circuit, left, ancilla, cbit_left)
+    measure_phase_parity_syndrome(circuit, right, ancilla, cbit_right)
 

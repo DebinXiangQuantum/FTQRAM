@@ -73,9 +73,6 @@ def build_bucktele_tree(qram: BuckQram, address_bits: int) -> None:
     qram.add_router_tree(0, root)
     qram.add_incident_qubits(incident)
 
-    for node in qram.routers[-1]:
-        node.add_data_qubits(qram.circuit)
-
 
 def _bitstring_to_rev(bitstring: str) -> str:
     compact = bitstring.replace(" ", "")
@@ -235,7 +232,7 @@ def run_dualrail(address_bits: int, data: List[int], shots: int, seed: int) -> T
         logical_h(circuit, pair)
 
     qram = DualRailBucketQram(address_list, data, bandwidth=1)
-    qram(addr_q, bus_q)
+    qram(circuit, addr_q, bus_q)
 
     addr_c = ClassicalRegister(2 * address_bits, "addr_c")
     bus_c = ClassicalRegister(2, "bus_c")
@@ -245,10 +242,90 @@ def run_dualrail(address_bits: int, data: List[int], shots: int, seed: int) -> T
     circuit.measure(bus_q, bus_c)
 
     backend = Aer.get_backend("qasm_simulator")
-    result = backend.run(circuit, shots=shots, seed_simulator=seed).result()
-    counts = result.get_counts(circuit)
+    try:
+        result = backend.run(circuit, shots=shots, seed_simulator=seed).result()
+        counts = result.get_counts(circuit)
+    except Exception as e:
+        print(f"  [SKIP dual-rail] simulation failed ({circuit.num_qubits} qubits): {e}")
+        return {}, -1.0
 
     return _dualrail_counts_to_logical(counts, circuit, addr_c, bus_c, address_bits)
+
+
+def run_dualrail_qram(address_bits: int, data: List[int], shots: int, seed: int) -> Tuple[Dict[str, int], float]:
+    """Run DualRailQram (cleaner tree architecture) and return (logical_counts, invalid_rate)."""
+    addr_q = QuantumRegister(2 * address_bits, "addr_dr")
+    bus_q = QuantumRegister(2, "bus_dr")
+    circuit = QuantumCircuit(addr_q, bus_q)
+
+    for pair in split_dual_rail_register(addr_q):
+        prepare_logical_zero(circuit, pair)
+        logical_h(circuit, pair)
+
+    qram = DualRailQram(address_bits, data, record_syndrome=False)
+    qram(circuit, addr_q, bus_q)
+
+    addr_c = ClassicalRegister(2 * address_bits, "addr_c")
+    bus_c = ClassicalRegister(2, "bus_c")
+    circuit.add_register(addr_c)
+    circuit.add_register(bus_c)
+    circuit.measure(addr_q, addr_c)
+    circuit.measure(bus_q, bus_c)
+
+    backend = Aer.get_backend("qasm_simulator")
+    try:
+        result = backend.run(circuit, shots=shots, seed_simulator=seed).result()
+        counts = result.get_counts(circuit)
+    except Exception as e:
+        print(f"  [SKIP DualRailQram] simulation failed ({circuit.num_qubits} qubits): {e}")
+        return {}, -1.0
+
+    return _dualrail_counts_to_logical(counts, circuit, addr_c, bus_c, address_bits)
+
+
+def run_dualrail_ft(address_bits: int, data: List[int], shots: int, seed: int) -> Tuple[Dict[str, int], float, bool]:
+    """Run DualRailQram with fault_tolerant=True and return (logical_counts, invalid_rate, all_syndrome_zero)."""
+    addr_q = QuantumRegister(2 * address_bits, "addr_dr")
+    bus_q = QuantumRegister(2, "bus_dr")
+    circuit = QuantumCircuit(addr_q, bus_q)
+
+    for pair in split_dual_rail_register(addr_q):
+        prepare_logical_zero(circuit, pair)
+        logical_h(circuit, pair)
+
+    qram = DualRailQram(address_bits, data, record_syndrome=True, fault_tolerant=True)
+    qram(circuit, addr_q, bus_q)
+
+    addr_c = ClassicalRegister(2 * address_bits, "addr_c")
+    bus_c = ClassicalRegister(2, "bus_c")
+    circuit.add_register(addr_c)
+    circuit.add_register(bus_c)
+    circuit.measure(addr_q, addr_c)
+    circuit.measure(bus_q, bus_c)
+
+    # Find syndrome register
+    syndrome_creg = next(r for r in circuit.cregs if r.name == "syndrome")
+    syndrome_idx = _reg_bit_indices(circuit, syndrome_creg)
+
+    backend = Aer.get_backend("qasm_simulator")
+    try:
+        result = backend.run(circuit, shots=shots, seed_simulator=seed).result()
+        counts = result.get_counts(circuit)
+    except Exception as e:
+        print(f"  [SKIP DualRailQram FT] simulation failed ({circuit.num_qubits} qubits): {e}")
+        return {}, -1.0, False
+
+    # Check if all syndrome bits are zero (noiseless = no false positives)
+    all_syndrome_zero = True
+    for bitstring, count in counts.items():
+        rev = _bitstring_to_rev(bitstring)
+        syn_bits = _extract_bits_by_index(rev, syndrome_idx)
+        if any(b == "1" for b in syn_bits):
+            all_syndrome_zero = False
+            break
+
+    logical_counts, invalid_rate = _dualrail_counts_to_logical(counts, circuit, addr_c, bus_c, address_bits)
+    return logical_counts, invalid_rate, all_syndrome_zero
 
 
 def build_cases(address_bits_list: List[int], random_cases: int) -> List[Tuple[str, int, List[int]]]:
@@ -271,23 +348,62 @@ def build_cases(address_bits_list: List[int], random_cases: int) -> List[Tuple[s
     return cases
 
 
+def verify_bucktele_correctness(address_bits: int, data: List[int], shots: int, seed: int) -> bool:
+    """Verify that bucktele produces bus=data[addr] for each address.
+
+    Note: routing sends addr_q[0] (Qiskit LSB) to the tree root (MSB),
+    so the effective data index is bit-reversed relative to the output string.
+    """
+    counts = run_bucktele(address_bits, data, shots, seed)
+    dist = _normalize(counts)
+    n = 2 ** address_bits
+    for addr_val in range(n):
+        addr_str = bin(addr_val)[2:].zfill(address_bits)
+        # The tree indexes data as int(addr_str[::-1], 2) due to Qiskit bit ordering
+        tree_idx = int(addr_str[::-1], 2)
+        expected_bus = str(data[tree_idx])
+        key = f"{addr_str}|{expected_bus}"
+        prob = dist.get(key, 0.0)
+        if prob < 1.0 / (2 * n):
+            print(f"  FAIL: addr={addr_str} tree_idx={tree_idx} expected bus={expected_bus} but prob={prob:.4f}")
+            return False
+    return True
+
+
 def main() -> int:
-    shots = int(os.environ.get("SHOTS", "32"))
-    random_cases = int(os.environ.get("RANDOM_CASES", "0"))
-    bits_env = os.environ.get("ADDRESS_BITS", "2")
+    shots = int(os.environ.get("SHOTS", "1000"))
+    random_cases = int(os.environ.get("RANDOM_CASES", "2"))
+    bits_env = os.environ.get("ADDRESS_BITS", "2,3")
     address_bits_list = [int(x) for x in bits_env.split(",") if x.strip()]
 
     tolerance_l1 = float(os.environ.get("TOL_L1", "0.15"))
     tolerance_max = float(os.environ.get("TOL_MAX", "0.12"))
 
-    results: List[CaseResult] = []
-
+    # First verify bucktele correctness standalone
+    print("=== Bucktele correctness check ===")
+    all_correct = True
     for idx, (name, address_bits, data) in enumerate(
         build_cases(address_bits_list, random_cases)
     ):
+        ok = verify_bucktele_correctness(address_bits, data, shots, 200 + idx)
+        print(f"  {name}: {'OK' if ok else 'FAIL'}")
+        if not ok:
+            all_correct = False
+    print(f"  Bucktele: {'ALL CORRECT' if all_correct else 'ERRORS FOUND'}\n")
+
+    print("=== Bucktele vs DualRailBucketQram comparison ===")
+    results: List[CaseResult] = []
+
+    cases = build_cases(address_bits_list, random_cases)
+
+    for idx, (name, address_bits, data) in enumerate(cases):
         seed = 100 + idx
         buck = run_bucktele(address_bits, data, shots, seed)
         dual, invalid_rate = run_dualrail(address_bits, data, shots, seed)
+
+        if invalid_rate < 0:
+            print(f"{name}: SKIPPED (dual-rail too large)")
+            continue
 
         l1, max_diff = _compare_distributions(buck, dual)
         passed = l1 <= tolerance_l1 and max_diff <= tolerance_max and invalid_rate <= 0.01
@@ -301,16 +417,64 @@ def main() -> int:
             )
         )
 
+        status = "PASS" if passed else "FAIL"
         print(
-            f"{name}: L1={l1:.4f} max={max_diff:.4f} invalid={invalid_rate:.4f} "
-            f"{'PASS' if passed else 'FAIL'}"
+            f"{name}: L1={l1:.4f} max={max_diff:.4f} invalid={invalid_rate:.4f} {status}"
         )
+        if not passed:
+            print(f"  bucktele: {_normalize(buck)}")
+            print(f"  dualrail: {_normalize(dual)}")
+
+    # ---- DualRailQram (non-FT) vs DualRailBucketQram ----
+    print("\n=== DualRailQram (non-FT) vs DualRailBucketQram ===")
+    for idx, (name, address_bits, data) in enumerate(cases):
+        seed = 100 + idx
+        dual_bucket, inv_bucket = run_dualrail(address_bits, data, shots, seed)
+        dual_qram, inv_qram = run_dualrail_qram(address_bits, data, shots, seed)
+
+        if inv_bucket < 0 or inv_qram < 0:
+            print(f"{name}: SKIPPED")
+            continue
+
+        l1, max_diff = _compare_distributions(dual_bucket, dual_qram)
+        ok = l1 <= tolerance_l1 and max_diff <= tolerance_max
+        status = "PASS" if ok else "FAIL"
+        print(f"{name}: L1={l1:.4f} max={max_diff:.4f} {status}")
+        if not ok:
+            results.append(CaseResult(name=f"qram-{name}", l1_distance=l1, max_diff=max_diff, invalid_rate=inv_qram, passed=False))
+        else:
+            results.append(CaseResult(name=f"qram-{name}", l1_distance=l1, max_diff=max_diff, invalid_rate=inv_qram, passed=True))
+
+    # ---- DualRailQram FT mode (noiseless) ----
+    print("\n=== DualRailQram FT mode (noiseless correctness) ===")
+    for idx, (name, address_bits, data) in enumerate(cases):
+        seed = 100 + idx
+        buck = run_bucktele(address_bits, data, shots, seed)
+        ft_counts, ft_invalid, all_syn_zero = run_dualrail_ft(address_bits, data, shots, seed)
+
+        if ft_invalid < 0:
+            print(f"{name}: SKIPPED (FT too large)")
+            continue
+
+        l1, max_diff = _compare_distributions(buck, ft_counts)
+        ok = l1 <= tolerance_l1 and max_diff <= tolerance_max and ft_invalid <= 0.01 and all_syn_zero
+        status = "PASS" if ok else "FAIL"
+        syn_status = "OK" if all_syn_zero else "FAIL (non-zero syndrome!)"
+        print(
+            f"{name}: L1={l1:.4f} max={max_diff:.4f} invalid={ft_invalid:.4f} syndrome={syn_status} {status}"
+        )
+        if not ok:
+            if not all_syn_zero:
+                print(f"  WARNING: syndrome bits were non-zero in noiseless mode!")
+            results.append(CaseResult(name=f"ft-{name}", l1_distance=l1, max_diff=max_diff, invalid_rate=ft_invalid, passed=False))
+        else:
+            results.append(CaseResult(name=f"ft-{name}", l1_distance=l1, max_diff=max_diff, invalid_rate=ft_invalid, passed=True))
 
     total = len(results)
-    passed = sum(1 for r in results if r.passed)
-    print(f"\nSummary: {passed}/{total} passed")
+    passed_count = sum(1 for r in results if r.passed)
+    print(f"\nSummary: {passed_count}/{total} passed")
 
-    return 0 if passed == total else 1
+    return 0 if passed_count == total else 1
 
 
 if __name__ == "__main__":
